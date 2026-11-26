@@ -496,6 +496,13 @@
     /* 자잘한 지역 라벨은 확대했을 때만 보여 지도가 답답하지 않게 한다 */
     #korea-map-svg:not(.labels-zoom) text.map-region-label.label-minor { display: none; }
 
+    /* 라벨 레이어와 라벨 글자는 어떤 배율에서도 클릭/탭을 가로막지 않는다 */
+    #map-labels-layer,
+    #map-labels-layer text,
+    text.map-region-label {
+      pointer-events: none;
+    }
+
     .map-tooltip {
       position: fixed;
       top: 0;
@@ -1132,8 +1139,11 @@
 
     // 지도 라벨: 확대해도 글자가 같이 커지지 않도록 역보정하고, 자잘한 지역 라벨은 확대 시에만 보여준다.
     const LABEL_FONT_BASE = 12.6;
-    const LABEL_FONT_COMPACT = 10.9;
+    const LABEL_FONT_COMPACT = 9.6;
     const LABEL_REVEAL_SCALE = 1.5;
+    // 확대 상한: 서울 25개 구·부산 16개 구처럼 작은 지역까지 충분히 키워 볼 수 있게 1600%까지 허용
+    const MAX_ZOOM_SCALE = 16;
+    const MIN_ZOOM_SCALE = 0.75;
     // 이 배율부터 라벨을 지역 내부 중심(cx, cy)으로 옮기기 시작해 1.85배에서 완전히 중앙에 둔다
     const LABEL_CENTER_START = 1.0;
     const LABEL_CENTER_SPAN = 0.5;
@@ -1733,11 +1743,14 @@
       if (svgRootEl) {
         // 확대하면 자잘한 지역 라벨도 함께 보인다
         svgRootEl.classList.toggle('labels-zoom', viewTransform.scale >= LABEL_REVEAL_SCALE);
-        // 라벨은 화면에서 항상 같은 크기로 보이도록 확대 배율을 역보정한다
-        const inverse = (1 / Math.pow(viewTransform.scale, 0.55)).toFixed(4);
+        // 라벨은 화면에서 거의 같은 크기로 보이도록 확대 배율을 역보정한다.
+        // 작은 구·시(compact) 라벨은 더 강하게 줄여 확대해도 지역 경계 밖으로 커지지 않게 한다.
+        const invBase = 1 / Math.pow(viewTransform.scale, 0.86);
+        const invCompact = 1 / Math.pow(viewTransform.scale, 0.97);
+        const inverse = invBase.toFixed(4);
         // 확대할수록 충돌 회피 위치(lx, ly) -> 지역 내부 중심(cx, cy)으로 라벨을 옮긴다
         const centerT = Math.min(1, Math.max(0, (viewTransform.scale - LABEL_CENTER_START) / LABEL_CENTER_SPAN));
-        const labelKey = `${inverse}|${centerT.toFixed(3)}`;
+        const labelKey = `${inverse}|${invCompact.toFixed(4)}|${centerT.toFixed(3)}`;
         if (labelKey !== lastLabelScale) {
           lastLabelScale = labelKey;
           for (let i = 0; i < labelScaleItems.length; i++) {
@@ -1750,9 +1763,10 @@
             }
             item.el.setAttribute('x', px.toFixed(1));
             item.el.setAttribute('y', py.toFixed(1));
+            const inv = (item.compact ? invCompact : invBase).toFixed(4);
             item.el.setAttribute(
               'transform',
-              `translate(${px.toFixed(1)} ${py.toFixed(1)}) scale(${inverse}) translate(${(-px).toFixed(1)} ${(-py).toFixed(1)})`
+              `translate(${px.toFixed(1)} ${py.toFixed(1)}) scale(${inv}) translate(${(-px).toFixed(1)} ${(-py).toFixed(1)})`
             );
           }
         }
@@ -1778,7 +1792,7 @@
     }
 
     function setZoomScale(nextScale, pivotX = MAP_CENTER.x, pivotY = MAP_CENTER.y) {
-      const clamped = Math.max(0.75, Math.min(6, nextScale));
+      const clamped = Math.max(MIN_ZOOM_SCALE, Math.min(MAX_ZOOM_SCALE, nextScale));
       const prev = viewTransform.scale;
       if (Math.abs(clamped - prev) < 0.001) return;
 
@@ -1825,6 +1839,7 @@
 
       const labelsGroup = document.createElementNS(ns, 'g');
       labelsGroup.setAttribute('id', 'map-labels-layer');
+      labelsGroup.setAttribute('pointer-events', 'none');
 
       const registerPath = (regionId, el) => {
         if (!pathElById.has(regionId)) pathElById.set(regionId, []);
@@ -1854,11 +1869,12 @@
         textEl.setAttribute('class', `map-region-label${status !== 'NONE' ? ' label-on-dark' : ''}${reg.minor ? ' label-minor' : ''}`);
         textEl.setAttribute('x', String(reg.lx));
         textEl.setAttribute('y', String(reg.ly));
+        textEl.setAttribute('pointer-events', 'none');
         textEl.style.fontSize = `${reg.compact ? LABEL_FONT_COMPACT : LABEL_FONT_BASE}px`;
         textEl.textContent = reg.shortLabel;
         labelsGroup.appendChild(textEl);
         registerLabel(reg.id, textEl);
-        labelScaleItems.push({ el: textEl, lx: reg.lx, ly: reg.ly, cx: reg.cx, cy: reg.cy });
+        labelScaleItems.push({ el: textEl, lx: reg.lx, ly: reg.ly, cx: reg.cx, cy: reg.cy, compact: !!reg.compact });
       }
 
       // 1-2) 시·도(17개) 외곽 경계를 굵은 선으로 그린다
@@ -1888,11 +1904,12 @@
       dokdoText.setAttribute('class', `map-region-label${dokdoStatus !== 'NONE' ? ' label-on-dark' : ''}`);
       dokdoText.setAttribute('x', String(DOKDO_MARKER.lx));
       dokdoText.setAttribute('y', String(DOKDO_MARKER.ly));
+      dokdoText.setAttribute('pointer-events', 'none');
       dokdoText.style.fontSize = `${LABEL_FONT_COMPACT}px`;
       dokdoText.textContent = DOKDO_MARKER.label;
       labelsGroup.appendChild(dokdoText);
       registerLabel(DOKDO_MARKER.regionId, dokdoText);
-      labelScaleItems.push({ el: dokdoText, lx: DOKDO_MARKER.lx, ly: DOKDO_MARKER.ly, cx: DOKDO_MARKER.lx, cy: DOKDO_MARKER.ly });
+      labelScaleItems.push({ el: dokdoText, lx: DOKDO_MARKER.lx, ly: DOKDO_MARKER.ly, cx: DOKDO_MARKER.lx, cy: DOKDO_MARKER.ly, compact: true });
 
       zoomGroup.appendChild(pathsGroup);
       zoomGroup.appendChild(sidoGroup);
